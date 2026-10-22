@@ -1,0 +1,1417 @@
+const FY_REGEX = /^\d{4}-\d{2,4}$/;
+
+function onOpen() {
+    const ui = SpreadsheetApp.getUi();
+    ui.createMenu('Financial Dashboard')
+        .addItem('Add New Financial Year', 'addNewYearPrompt')
+        .addItem('Update Master Year & Dashboard', 'updateAllSheetsManual')
+        .addSeparator()
+        .addItem('Export to PDF (All Sheets or by Name)', 'exportPdfPrompt')
+        .addToUi();
+}
+
+function addNewYearPrompt() {
+    const ui = SpreadsheetApp.getUi();
+    const result = ui.prompt(
+        'Add New Financial Year Sheet',
+        'Enter the financial year range (e.g., 2025-2026 or 2025-26):',
+        ui.ButtonSet.OK_CANCEL
+    );
+
+    const button = result.getSelectedButton();
+    const fyText = result.getResponseText().trim();
+
+    if (button !== ui.Button.OK) return;
+
+    const match = fyText.match(/^(\d{4})-(\d{2}|\d{4})$/);
+    if (!match) {
+        ui.alert('Invalid Format', 'Please enter a valid financial year range like "2025-2026" or "2025-26".', ui.ButtonSet.OK);
+        return;
+    }
+
+    let startYear = parseInt(match[1], 10);
+    let endYear = match[2].length === 2
+        ? Math.floor(startYear / 100) * 100 + parseInt(match[2], 10)
+        : parseInt(match[2], 10);
+
+    if (endYear !== startYear + 1) {
+        ui.alert('Invalid Year Range', 'The second year must be exactly one year after the first year (e.g., 2025-2026).', ui.ButtonSet.OK);
+        return;
+    }
+
+    const normalizedFY = `${startYear}-${endYear}`;
+    addNewYearSheet(normalizedFY, startYear, endYear);
+}
+
+function addNewYearSheet(fyRange, startYear, endYear) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    if (ss.getSheetByName(fyRange)) {
+        SpreadsheetApp.getUi().alert(`A sheet named "${fyRange}" already exists!`);
+        return;
+    }
+
+    if (!startYear || !endYear) {
+        const parts = fyRange.split("-");
+        startYear = parseInt(parts[0], 10);
+        endYear = parts[1].length === 2 ? Math.floor(startYear / 100) * 100 + parseInt(parts[1], 10) : parseInt(parts[1], 10);
+    }
+
+    const newSheet = ss.insertSheet(fyRange);
+
+    setupTableHeaders(newSheet);
+
+    const months = [
+        [`July, ${startYear}`], [`August, ${startYear}`], [`September, ${startYear}`],
+        [`October, ${startYear}`], [`November, ${startYear}`], [`December, ${startYear}`],
+        [`January, ${endYear}`], [`February, ${endYear}`], [`March, ${endYear}`],
+        [`April, ${endYear}`], [`May, ${endYear}`], [`June, ${endYear}`]
+    ];
+    newSheet.getRange("A4:A15").setValues(months).setNumberFormat("@");
+
+    // Batch set formulas across ranges (auto-adjusts row references)
+    newSheet.getRange("F4:F15").setFormula("=SUM(B4:E4)");
+    newSheet.getRange("H4:H15").setFormula("=F4-N(G4)-N(J4)");
+
+    // Batch set alternating row backgrounds
+    const bgs = [];
+    for (let r = 4; r <= 15; r++) {
+        const bg = (r % 2 === 0) ? "#FFFFFF" : "#F8F9FA";
+        bgs.push(Array(11).fill(bg));
+    }
+    newSheet.getRange("A4:K15").setBackgrounds(bgs);
+
+    // Total Row
+    newSheet.getRange("A16").setValue(`Total (${fyRange})`);
+    const sumFormulas = [
+        "=SUM(B4:B15)", "=SUM(C4:C15)", "=SUM(D4:D15)", "=SUM(E4:E15)",
+        "=SUM(F4:F15)", "=SUM(G4:G15)", "=SUM(H4:H15)", "",
+        "=SUM(J4:J15)", "=SUM(K4:K15)"
+    ];
+    newSheet.getRange("B16:K16").setFormulas([sumFormulas]);
+
+    newSheet.getRange("A16:K16").setFontWeight("bold").setBackground("#D5F5E3");
+
+    newSheet.getRange("B4:H16").setNumberFormat('#,##0"/="');
+    newSheet.getRange("I4:I16").setNumberFormat("@");
+    newSheet.getRange("J4:K16").setNumberFormat('#,##0"/="');
+
+    applyProfessionalBorders(newSheet.getRange("A2:K16"));
+    newSheet.autoResizeColumns(1, 11);
+    trimSheet(newSheet, 16, 11);
+
+    updateAllSheets(newSheet, ss);
+    SpreadsheetApp.getUi().alert('Success', `Sheet for Financial Year ${fyRange} created!`, SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function setupTableHeaders(sheet) {
+    sheet.getRange("A1:K3").breakApart();
+
+    sheet.getRange("A2:A3").merge().setValue("Month/Year");
+    sheet.getRange("I2:I3").merge().setValue("Remarks");
+    sheet.getRange("J2:J3").merge().setValue("Provident Fund");
+    sheet.getRange("K2:K3").merge().setValue("Monthly Savings");
+
+    sheet.getRange("B2:H2").merge().setValue("Salary and Others");
+
+    const subHeaders = [[
+        "Basic Salary", "House Rent", "Conveyance Allowance",
+        "Medical & Others", "Total Salary", "Tax", "Net Income"
+    ]];
+    sheet.getRange("B3:H3").setValues(subHeaders);
+
+    sheet.getRange("A2:K3")
+        .setFontWeight("bold")
+        .setFontColor("#FFFFFF")
+        .setBackground("#2C3E50")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle");
+
+    sheet.getRange("B3:H3")
+        .setFontColor("#1C2833")
+        .setBackground("#EAEDED");
+}
+
+function cleanCurrencyInput(range, customFormat = null) {
+    const values = range.getValues();
+    let hasChanges = false;
+
+    for (let i = 0; i < values.length; i++) {
+        for (let j = 0; j < values[i].length; j++) {
+            const val = values[i][j];
+            if (typeof val === 'string' && val.trim().length > 0) {
+                const cleaned = val.replace(/,/g, '').replace(/[^0-9.]/g, '');
+                if (cleaned !== '' && !isNaN(cleaned)) {
+                    values[i][j] = parseFloat(cleaned);
+                    hasChanges = true;
+                }
+            }
+        }
+    }
+
+    if (hasChanges) {
+        range.setValues(values);
+        if (customFormat) range.setNumberFormat(customFormat);
+    }
+}
+
+function onEdit(e) {
+    if (!e || !e.range) return;
+
+    const sheet = e.range.getSheet();
+    const sheetName = sheet.getName();
+
+    // 1. Handlers for Expenses, DPS Tracker & Cash in Hand Sheets
+    if (sheetName === "Expenses" || sheetName === "DPS Tracker" || sheetName === "Cash in Hand") {
+        const startCol = e.range.getColumn();
+        const endCol = startCol + e.range.getNumColumns() - 1;
+        const rowIndex = e.range.getRow();
+
+        // Clean currency strings if entered in Amount column (Col 3, or Col 2 for Cash in Hand) or Initial Amount (Col 2 in Expenses)
+        const isExpenseAmt = (sheetName === "Expenses" && startCol <= 3 && endCol >= 3);
+        const isExpenseInit = (sheetName === "Expenses" && startCol <= 2 && endCol >= 2 && rowIndex >= 5 && rowIndex <= 7);
+        const isDpsAmt = (sheetName === "DPS Tracker" && startCol <= 3 && endCol >= 3);
+        const isCashAmt = (sheetName === "Cash in Hand" && startCol <= 2 && endCol >= 2);
+
+        if (isExpenseAmt || isExpenseInit || isDpsAmt || isCashAmt) {
+            cleanCurrencyInput(e.range);
+        }
+
+        // Apply row colors if Status (Col 4) or Summary Table (Col 8, 9) is edited in DPS Tracker
+        if (sheetName === "DPS Tracker" && ((startCol <= 4 && endCol >= 4) || (startCol <= 9 && endCol >= 8))) {
+            applyDPSRowColors(sheet);
+        }
+        return;
+    }
+
+    // 2. Handlers for Investment Sheet
+    if (sheetName === "Investment") {
+        const startRow = e.range.getRow();
+        const endRow = startRow + e.range.getNumRows() - 1;
+        const startCol = e.range.getColumn();
+        const endCol = startCol + e.range.getNumColumns() - 1;
+
+        if (endRow >= 3 && startRow <= 50) {
+            // Update row colors when Investment Type (Col 2) or Status (Col 7) is edited
+            if ((startCol <= 2 && endCol >= 2) || (startCol <= 7 && endCol >= 7)) {
+                applyInvestmentRowColors(sheet);
+            }
+
+            // Clean currency strings if entered in Amount column (Col 3)
+            if (startCol <= 3 && endCol >= 3) {
+                const amtRange = sheet.getRange(Math.max(3, startRow), 3, Math.min(50, endRow) - Math.max(3, startRow) + 1, 1);
+                cleanCurrencyInput(amtRange, '#,##0"/="');
+            }
+        }
+        return;
+    }
+
+    // 3. Handlers for Financial Year Sheets
+    if (FY_REGEX.test(sheetName)) {
+        const colIndex = e.range.getColumn();
+        // Clean user input if currency strings with '/=' or commas are pasted (except Remarks column 9)
+        if (colIndex !== 9) {
+            cleanCurrencyInput(e.range);
+        }
+    }
+}
+
+function updateAllSheetsManual() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    updateAllSheets(ss.getActiveSheet(), ss);
+    SpreadsheetApp.getUi().alert(
+        'Update Complete',
+        'Master Year and Dashboard updated successfully!\nAll blank rows and columns have also been cleaned.',
+        SpreadsheetApp.getUi().ButtonSet.OK
+    );
+}
+
+function updateAllSheets(targetSheet, ss = null) {
+    if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+    const originalActiveSheet = ss.getActiveSheet();
+
+    const masterSubTotalRow = consolidateMasterYear(ss);
+    consolidateInvestmentSheet(ss);
+    setupExpensesSheet(ss);
+    setupDPSTrackerSheet(ss);
+    setupCashInHandSheet(ss);
+    consolidateDashboard(targetSheet, masterSubTotalRow, ss);
+    trimAllSheets(ss);
+
+    if (originalActiveSheet) {
+        ss.setActiveSheet(originalActiveSheet);
+    }
+}
+
+function setupCashInHandSheet(ss) {
+    if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+    let cashSheet = ss.getSheetByName("Cash in Hand");
+
+    if (!cashSheet) {
+        cashSheet = ss.insertSheet("Cash in Hand");
+    }
+
+    ensureSheetDimensions(cashSheet, 6, 3);
+
+    if (cashSheet.getRange("A1").getValue() === "") {
+        cashSheet.getRange("A1:C2").breakApart();
+        cashSheet.getRange("A1:C1").merge().setValue("Cash in Hand Tracker")
+            .setFontWeight("bold").setFontSize(14).setFontColor("#FFFFFF")
+            .setBackground("#1B4F72").setHorizontalAlignment("center").setVerticalAlignment("middle");
+
+        cashSheet.getRange("A2:C2").setValues([["Location", "Amount", "Remarks"]])
+            .setFontWeight("bold").setBackground("#2C3E50").setFontColor("#FFFFFF").setHorizontalAlignment("center");
+
+        cashSheet.setColumnWidth(1, 150);
+        cashSheet.setColumnWidth(2, 120);
+        cashSheet.setColumnWidth(3, 250);
+
+        applyProfessionalBorders(cashSheet.getRange("A2:C6"));
+        cashSheet.setFrozenRows(2);
+    } else {
+        applyProfessionalBorders(cashSheet.getRange("A2:C6"));
+    }
+
+    const locations = ["At Home", "With me", "Other"];
+    const ruleLoc = SpreadsheetApp.newDataValidation().requireValueInList(locations, true).setAllowInvalid(true).build();
+    cashSheet.getRange("A3:A5").setDataValidation(ruleLoc);
+
+    cashSheet.getRange("B3:B5").setNumberFormat('#,##0"/="');
+
+    cashSheet.getRange("A6").setValue("Total").setFontWeight("bold").setHorizontalAlignment("right");
+    cashSheet.getRange("B6").setFormula("=SUM(B3:B5)").setFontWeight("bold").setNumberFormat('#,##0"/="');
+    cashSheet.getRange("A6:C6").setBackground("#EAEDED");
+}
+
+function setupDPSTrackerSheet(ss) {
+    if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+    let dpsSheet = ss.getSheetByName("DPS Tracker");
+
+    if (!dpsSheet) {
+        dpsSheet = ss.insertSheet("DPS Tracker");
+    }
+
+    ensureSheetDimensions(dpsSheet, 100, 10);
+
+    // Only write headers if the sheet is newly created/empty to prevent overwriting user data
+    if (dpsSheet.getRange("A1").getValue() === "") {
+        dpsSheet.getRange("A1:E2").breakApart();
+        dpsSheet.getRange("A1:E1").merge().setValue("DPS Tracker")
+            .setFontWeight("bold").setFontSize(14).setFontColor("#FFFFFF")
+            .setBackground("#1B4F72").setHorizontalAlignment("center").setVerticalAlignment("middle");
+
+        dpsSheet.getRange("A2:E2").setValues([["Date", "DPS Account", "Installment Amount", "Status", "Remarks"]])
+            .setFontWeight("bold").setBackground("#2C3E50").setFontColor("#FFFFFF").setHorizontalAlignment("center");
+
+        dpsSheet.setColumnWidth(1, 100);
+        dpsSheet.setColumnWidth(2, 150);
+        dpsSheet.setColumnWidth(3, 120);
+        dpsSheet.setColumnWidth(4, 120);
+        dpsSheet.setColumnWidth(5, 250);
+
+        applyProfessionalBorders(dpsSheet.getRange("A2:E50"));
+        dpsSheet.setFrozenRows(2);
+    }
+
+    // Add DPS Summary Table
+    if (dpsSheet.getRange("G1").getValue() === "") {
+        dpsSheet.getRange("G1:J2").breakApart();
+        dpsSheet.getRange("G1:J1").merge().setValue("DPS Account Summary")
+            .setFontWeight("bold").setFontSize(12).setFontColor("#FFFFFF")
+            .setBackground("#1B4F72").setHorizontalAlignment("center").setVerticalAlignment("middle");
+
+        dpsSheet.getRange("G2:J2").setValues([["DPS Account", "Matured Date", "Account Status", "Total Deposited"]])
+            .setFontWeight("bold").setBackground("#EAEDED").setHorizontalAlignment("center").setVerticalAlignment("middle");
+
+        dpsSheet.getRange("G3:G5").setValues([["DPS1"], ["DPS2"], ["DPS3"]]).setFontWeight("bold");
+
+        const ruleStatusSummary = SpreadsheetApp.newDataValidation().requireValueInList(["Active", "Close"], true).setAllowInvalid(false).build();
+        dpsSheet.getRange("I3:I5").setDataValidation(ruleStatusSummary).setValue("Active");
+
+        dpsSheet.getRange("H3:H5").setNumberFormat("yyyy-mm-dd");
+        dpsSheet.getRange("J3:J5").setFormulas([
+            ['=SUMIFS(C$3:C$1000, B$3:B$1000, G3, D$3:D$1000, "Paid")'],
+            ['=SUMIFS(C$3:C$1000, B$3:B$1000, G4, D$3:D$1000, "Paid")'],
+            ['=SUMIFS(C$3:C$1000, B$3:B$1000, G5, D$3:D$1000, "Paid")']
+        ]).setNumberFormat('#,##0"/="');
+
+        dpsSheet.setColumnWidth(6, 35);  // F: spacer
+        dpsSheet.setColumnWidth(7, 100); // G
+        dpsSheet.setColumnWidth(8, 120); // H
+        dpsSheet.setColumnWidth(9, 110); // I
+        dpsSheet.setColumnWidth(10, 140); // J
+
+        applyProfessionalBorders(dpsSheet.getRange("G1:J5"));
+    }
+
+    // Add dropdown for DPS1, DPS2, DPS3 in "DPS Account" column (Col B)
+    const dpsAccounts = ["DPS1", "DPS2", "DPS3"];
+    const ruleDPS = SpreadsheetApp.newDataValidation().requireValueInList(dpsAccounts, true).setAllowInvalid(true).build();
+    dpsSheet.getRange("B3:B1000").setDataValidation(ruleDPS);
+
+    // Add status dropdown (Col D)
+    const statuses = ["Paid", "Pending"];
+    const ruleStatus = SpreadsheetApp.newDataValidation().requireValueInList(statuses, true).setAllowInvalid(false).build();
+    dpsSheet.getRange("D3:D1000").setDataValidation(ruleStatus);
+
+    // Formatting
+    dpsSheet.getRange("A3:A1000").setNumberFormat("yyyy-mm-dd"); // Standardize Installment Date
+    dpsSheet.getRange("C3:C1000").setNumberFormat('#,##0"/="');
+
+    applyDPSRowColors(dpsSheet);
+}
+
+function applyDPSRowColors(dpsSheet) {
+    const maxRows = Math.max(dpsSheet.getMaxRows(), 3);
+    const numRows = maxRows - 2;
+    if (numRows > 0) {
+        const dataValues = dpsSheet.getRange(3, 4, numRows, 1).getValues();
+        const bgs = [];
+
+        for (let r = 0; r < dataValues.length; r++) {
+            const status = dataValues[r][0];
+            let color = "#FFFFFF";
+
+            if (status === "Paid") {
+                color = "#E2EFDA"; // Soft Green
+            } else if (status === "Pending") {
+                color = "#DDEBF7"; // Soft Blue
+            }
+
+            bgs.push(Array(5).fill(color));
+        }
+
+        dpsSheet.getRange(3, 1, numRows, 5).setBackgrounds(bgs);
+    }
+
+    // Summary table colors
+    const summaryData = dpsSheet.getRange("H3:I5").getValues();
+    const sumBgs = [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    for (let r = 0; r < summaryData.length; r++) {
+        const expRaw = summaryData[r][0];
+        const status = summaryData[r][1];
+        const expDate = expRaw ? new Date(expRaw) : null;
+        let color = "#FFFFFF";
+
+        if (status === "Close") {
+            color = "#FCE4D6"; // Closed (Soft Peach)
+        } else if (status === "Active" && expDate && !isNaN(expDate.getTime()) && expDate < today) {
+            color = "#FADBD8"; // Warning: Expired Active (Soft Red)
+        }
+
+        sumBgs.push(Array(4).fill(color));
+    }
+
+    dpsSheet.getRange("G3:J5").setBackgrounds(sumBgs);
+}
+
+function consolidateMasterYear(ss) {
+    if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+    let masterSheet = ss.getSheetByName("Master Year");
+
+    if (!masterSheet) {
+        masterSheet = ss.insertSheet("Master Year", 1);
+    } else {
+        masterSheet.clear();
+        masterSheet.getRange(1, 1, masterSheet.getMaxRows(), masterSheet.getMaxColumns()).breakApart();
+    }
+
+    setupTableHeaders(masterSheet);
+
+    const sheets = ss.getSheets();
+    const fySheets = sheets.filter(s => FY_REGEX.test(s.getName()));
+
+    // Sort chronologically by start year
+    fySheets.sort((a, b) => parseInt(a.getName().split("-")[0], 10) - parseInt(b.getName().split("-")[0], 10));
+
+    const neededRows = Math.max(4 + (fySheets.length * 13) + 2, 20);
+    ensureSheetDimensions(masterSheet, neededRows, 11);
+
+    let currentRow = 4;
+    const totalRowsList = [];
+
+    for (let i = 0; i < fySheets.length; i++) {
+        const sheet = fySheets[i];
+        const sheetName = sheet.getName();
+        const startRow = currentRow;
+
+        // Dynamic formulas linking directly to the financial year sheet
+        const formulaGrid = [];
+        for (let r = 0; r < 12; r++) {
+            const srcRow = 4 + r;
+            const mRow = startRow + r;
+            formulaGrid.push([
+                `='${sheetName}'!A${srcRow}`,
+                `='${sheetName}'!B${srcRow}`,
+                `='${sheetName}'!C${srcRow}`,
+                `='${sheetName}'!D${srcRow}`,
+                `='${sheetName}'!E${srcRow}`,
+                `=SUM(B${mRow}:E${mRow})`,
+                `='${sheetName}'!G${srcRow}`,
+                `=F${mRow}-N(G${mRow})-N(J${mRow})`,
+                `='${sheetName}'!I${srcRow}`,
+                `='${sheetName}'!J${srcRow}`,
+                `='${sheetName}'!K${srcRow}`
+            ]);
+        }
+
+        masterSheet.getRange(startRow, 1, 12, 11).setFormulas(formulaGrid);
+        masterSheet.getRange(`A${startRow}:A${startRow + 11}`).setNumberFormat("@");
+        masterSheet.getRange(`I${startRow}:I${startRow + 11}`).setNumberFormat("@");
+
+        // Alternating backgrounds
+        const bgs = [];
+        for (let r = startRow; r < startRow + 12; r++) {
+            const bg = (r % 2 === 0) ? "#FFFFFF" : "#F8F9FA";
+            bgs.push(Array(11).fill(bg));
+        }
+        masterSheet.getRange(`A${startRow}:K${startRow + 11}`).setBackgrounds(bgs);
+
+        currentRow += 12;
+
+        masterSheet.getRange(`A${currentRow}`).setValue(`Total (${sheetName})`);
+        const endRow = currentRow - 1;
+        const sumFormulas = [
+            `=SUM(B${startRow}:B${endRow})`,
+            `=SUM(C${startRow}:C${endRow})`,
+            `=SUM(D${startRow}:D${endRow})`,
+            `=SUM(E${startRow}:E${endRow})`,
+            `=SUM(F${startRow}:F${endRow})`,
+            `=SUM(G${startRow}:G${endRow})`,
+            `=SUM(H${startRow}:H${endRow})`,
+            "",
+            `=SUM(J${startRow}:J${endRow})`,
+            `=SUM(K${startRow}:K${endRow})`
+        ];
+        masterSheet.getRange(`B${currentRow}:K${currentRow}`).setFormulas([sumFormulas]);
+        masterSheet.getRange(`A${currentRow}:K${currentRow}`).setFontWeight("bold").setBackground("#FCF3CF");
+        totalRowsList.push(currentRow);
+        currentRow += 1;
+    }
+
+    if (totalRowsList.length > 0) {
+        masterSheet.getRange(`A${currentRow}`).setValue("SUB TOTAL");
+
+        const cols = ["B", "C", "D", "E", "F", "G", "H", "I", "J", "K"];
+        const subTotalFormulas = cols.map(colLetter => {
+            if (colLetter === "I") return "";
+            return `=SUM(${totalRowsList.map(r => `${colLetter}${r}`).join(",")})`;
+        });
+        masterSheet.getRange(`B${currentRow}:K${currentRow}`).setFormulas([subTotalFormulas]);
+
+        masterSheet.getRange(`A${currentRow}:K${currentRow}`)
+            .setFontWeight("bold")
+            .setFontColor("#1B4F72")
+            .setBackground("#D4E6F1");
+
+        masterSheet.getRange(`B4:H${currentRow}`).setNumberFormat('#,##0"/="');
+        masterSheet.getRange(`I4:I${currentRow}`).setNumberFormat("@");
+        masterSheet.getRange(`J4:K${currentRow}`).setNumberFormat('#,##0"/="');
+
+        applyProfessionalBorders(masterSheet.getRange(`A2:K${currentRow}`));
+    }
+
+    masterSheet.autoResizeColumns(1, 11);
+    trimSheet(masterSheet, currentRow, 11);
+    return currentRow;
+}
+
+function consolidateInvestmentSheet(ss) {
+    if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+    let invSheet = ss.getSheetByName("Investment");
+
+    if (!invSheet) {
+        invSheet = ss.insertSheet("Investment");
+    }
+
+    ensureSheetDimensions(invSheet, 50, 8);
+
+    invSheet.getRange("A2:H2").breakApart();
+
+    invSheet.getRange("A1:H1").merge()
+        .setValue("Investment Details")
+        .setFontWeight("bold")
+        .setFontSize(14)
+        .setFontColor("#FFFFFF")
+        .setBackground("#1B4F72")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle");
+
+    invSheet.getRange("A2:H2").setValues([["#", "Investment Type", "Amount", "Issue date", "Expired date", "Duration Year", "Active Status", "Institution / Remarks"]]);
+    invSheet.getRange("A2:H2").setFontWeight("bold").setBackground("#EAEDED").setHorizontalAlignment("center").setVerticalAlignment("middle");
+
+    // Clean and convert any text-formatted currency strings in Column C
+    const amtRange = invSheet.getRange("C3:C50");
+    cleanCurrencyInput(amtRange);
+
+    // Clean whitespace from Type (Col B) and Status (Col G)
+    const bgRange = invSheet.getRange("B3:G50");
+    const bgVals = bgRange.getValues();
+    let hasCleanedBG = false;
+    for (let i = 0; i < bgVals.length; i++) {
+        const typeStr = bgVals[i][0];
+        const statusStr = bgVals[i][5];
+        if (typeof typeStr === 'string' && typeStr !== typeStr.trim()) {
+            bgVals[i][0] = typeStr.trim();
+            hasCleanedBG = true;
+        }
+        if (typeof statusStr === 'string' && statusStr !== statusStr.trim()) {
+            bgVals[i][5] = statusStr.trim();
+            hasCleanedBG = true;
+        }
+    }
+    if (hasCleanedBG) {
+        bgRange.setValues(bgVals);
+    }
+
+    const ruleType = SpreadsheetApp.newDataValidation()
+        .requireValueInList(["Shonchoypotro", "Business", "In Savings Account"], true)
+        .setAllowInvalid(false)
+        .build();
+    invSheet.getRange("B3:B50").setDataValidation(ruleType);
+
+    const ruleStatus = SpreadsheetApp.newDataValidation()
+        .requireValueInList(["Active", "Close"], true)
+        .setAllowInvalid(false)
+        .build();
+    invSheet.getRange("G3:G50").setDataValidation(ruleStatus);
+
+    // Ensure Column H (Institution / Remarks) is free-text and clears any leaked dropdowns
+    invSheet.getRange("H3:H50").clearDataValidations();
+
+    invSheet.getRange("A3:A50").setNumberFormat("0");
+    invSheet.getRange("C3:C50").setNumberFormat('#,##0"/="');
+    invSheet.getRange("D3:E50").setNumberFormat("yyyy-mm-dd");
+    invSheet.getRange("F3:F50").setNumberFormat("0");
+
+    applyProfessionalBorders(invSheet.getRange("A1:H50"));
+    applyInvestmentRowColors(invSheet);
+    invSheet.autoResizeColumns(1, 8);
+    trimSheet(invSheet, 50, 8);
+}
+
+function applyInvestmentRowColors(invSheet) {
+    // Single batched API call for performance (reads B3 to G50)
+    const dataValues = invSheet.getRange("B3:G50").getValues();
+    const bgs = [];
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    for (let r = 0; r < dataValues.length; r++) {
+        const type = dataValues[r][0];     // Col B (Index 0)
+        const expRaw = dataValues[r][3];   // Col E (Index 3)
+        const status = dataValues[r][5];   // Col G (Index 5)
+        const expDate = expRaw ? new Date(expRaw) : null;
+        let color = "#FFFFFF";
+
+        if (status === "Close") {
+            color = "#FCE4D6"; // Closed (Soft Peach)
+        } else if (status === "Active" && expDate && !isNaN(expDate.getTime()) && expDate < today) {
+            color = "#FADBD8"; // Warning: Matured / Expired Active Investment (Soft Red)
+        } else if (type === "Shonchoypotro") {
+            color = "#E2EFDA"; // Soft Green
+        } else if (type === "Business") {
+            color = "#FFF2CC"; // Soft Yellow
+        } else if (type === "In Savings Account") {
+            color = "#EDE7F6"; // Soft Lavender / Purple
+        }
+
+        bgs.push(Array(8).fill(color)); // Fill A to H with the selected background
+    }
+
+    invSheet.getRange("A3:H50").setBackgrounds(bgs);
+}
+
+function setupExpensesSheet(ss) {
+    if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+    let expSheet = ss.getSheetByName("Expenses");
+
+    if (!expSheet) {
+        expSheet = ss.insertSheet("Expenses");
+    } else {
+        return; // Only set up once to preserve user data
+    }
+
+    ensureSheetDimensions(expSheet, 100, 5);
+
+    // Header
+    expSheet.getRange("A1:E1").merge().setValue("Monthly Expenses Tracker")
+        .setFontWeight("bold").setFontSize(14).setFontColor("#FFFFFF")
+        .setBackground("#1B4F72").setHorizontalAlignment("center").setVerticalAlignment("middle");
+
+    // Total Salary
+    expSheet.getRange("A3").setValue("Total Salary for this month:").setFontWeight("bold");
+    expSheet.getRange("B3").setFormula("=SUM(B5:B7)").setFontWeight("bold").setNumberFormat('#,##0"/="');
+    expSheet.getRange("C3").setValue("← Auto-calculated from Initial Amounts").setFontColor("#5F6368").setFontStyle("italic");
+
+    // Account Summary Table
+    expSheet.getRange("A4:C4").setValues([["Account", "Initial Amount", "Remaining Amount"]])
+        .setFontWeight("bold").setBackground("#EAEDED").setHorizontalAlignment("center");
+
+    const accounts = [
+        ["In Bank", "", '=IF(ISBLANK(B5), "", B5 - SUMIF($D$11:$D$1000, A5, $C$11:$C$1000))'],
+        ["Cash In hand", "", '=IF(ISBLANK(B6), "", B6 - SUMIF($D$11:$D$1000, A6, $C$11:$C$1000))'],
+        ["Bkash", "", '=IF(ISBLANK(B7), "", B7 - SUMIF($D$11:$D$1000, A7, $C$11:$C$1000))']
+    ];
+    expSheet.getRange("A5:C7").setValues(accounts);
+    expSheet.getRange("B5:C7").setNumberFormat('#,##0"/="');
+    applyProfessionalBorders(expSheet.getRange("A4:C7"));
+
+    // Set background for Initial Amount input cells
+    expSheet.getRange("B5:B7").setBackground("#FFF3E0"); // Light orange for input indication
+
+    // Expenses Table Header
+    expSheet.getRange("A10:E10").setValues([["Date", "Expense Category", "Amount", "Paid Via", "Remarks"]])
+        .setFontWeight("bold").setBackground("#2C3E50").setFontColor("#FFFFFF").setHorizontalAlignment("center");
+
+    // Dropdowns & Formatting
+    const categories = ["Housing/Rent", "Food & Groceries", "Transportation", "Utilities & Bills", "Healthcare", "Entertainment", "Shopping", "Education", "Others"];
+    const ruleCategory = SpreadsheetApp.newDataValidation().requireValueInList(categories, true).setAllowInvalid(true).build();
+    expSheet.getRange("B11:B1000").setDataValidation(ruleCategory);
+
+    const paidVia = ["In Bank", "Cash In hand", "Bkash"];
+    const rulePaidVia = SpreadsheetApp.newDataValidation().requireValueInList(paidVia, true).setAllowInvalid(false).build();
+    expSheet.getRange("D11:D1000").setDataValidation(rulePaidVia);
+
+    expSheet.getRange("C11:C1000").setNumberFormat('#,##0"/="');
+
+    expSheet.setColumnWidth(1, 100);
+    expSheet.setColumnWidth(2, 160);
+    expSheet.setColumnWidth(3, 120);
+    expSheet.setColumnWidth(4, 120);
+    expSheet.setColumnWidth(5, 250);
+
+    applyProfessionalBorders(expSheet.getRange("A10:E50"));
+
+    expSheet.setFrozenRows(10);
+}
+
+function consolidateDashboard(targetSheet, masterSubTotalRow, ss) {
+    if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+    let dashboard = ss.getSheetByName("Dashboard");
+
+    if (!dashboard) {
+        dashboard = ss.insertSheet("Dashboard", 0);
+    }
+
+    const sheets = ss.getSheets();
+    const fySheets = sheets.filter(s => FY_REGEX.test(s.getName()));
+    fySheets.sort((a, b) => parseInt(a.getName().split("-")[0], 10) - parseInt(b.getName().split("-")[0], 10));
+
+    if (!masterSubTotalRow) {
+        masterSubTotalRow = 4 + (fySheets.length * 13);
+    }
+
+    let activeFYSheet = targetSheet;
+    if (!activeFYSheet || !FY_REGEX.test(activeFYSheet.getName())) {
+        activeFYSheet = fySheets.length > 0 ? fySheets[fySheets.length - 1] : null;
+    }
+    const activeFYName = activeFYSheet ? activeFYSheet.getName() : "";
+
+    // Precalculate exact layout bounds to avoid extra blank pages in PDF export
+    const dropdownRow = 15;
+    const activeTableStart = dropdownRow + 2;
+    const dropdownCellRef = `$C$${dropdownRow}`;
+    const activeTableEnd = activeTableStart + 12;
+    const yearlyStartRow = Math.max(activeTableEnd + 3, 32);
+    const yearlyDataCountInitial = fySheets.length;
+    const grandTotalRow = yearlyStartRow + (yearlyDataCountInitial > 0 ? yearlyDataCountInitial : 1) + 1;
+    const invTableStart = Math.max(grandTotalRow + 3, 42);
+    const invTotalRow = invTableStart + 8;
+    const pfStartRow = Math.max(invTotalRow + 3, 52);
+    const pfDataCountInitial = fySheets.length > 1 ? fySheets.length : 12;
+    const pfTotalRow = pfStartRow + 1 + pfDataCountInitial;
+
+    const chart1Row = 15;
+    const chart2Row = Math.max(chart1Row + 16, activeTableStart);
+    const chart3Row = Math.max(chart2Row + 16, yearlyStartRow);
+    const chart4Row = Math.max(chart3Row + 16, invTableStart);
+    // Keep 3 blank rows below the last graph so it is never cut off
+    const dashboardLastRow = Math.max(chart4Row + 16, pfTotalRow + 2) + 3;
+
+    ensureSheetDimensions(dashboard, dashboardLastRow, 13);
+    dashboard.clear();
+    dashboard.setHiddenGridlines(true);
+    dashboard.getRange(1, 1, dashboardLastRow, 13).setBackground("#F4F7F6").setFontFamily("Google Sans");
+
+    // Modern Header (Rows 2 & 3)
+    dashboard.getRange("B2").setValue("Executive Financial Overview").setFontSize(22).setFontWeight("bold").setFontColor("#202124");
+    dashboard.getRange("B3").setValue("Live snapshot of your wealth, savings, and investments.").setFontSize(11).setFontColor("#5F6368");
+
+    // 1. ACTIVE FINANCIAL YEAR OVERVIEW TABLE (Linked to interactive dropdown)
+    dashboard.getRange(`B${dropdownRow}`).setValue("Viewing Financial Year:").setFontWeight("bold").setFontSize(13).setFontColor("#202124");
+    if (fySheets.length > 0) {
+        const fyNames = fySheets.map(s => s.getName());
+        const ruleYear = SpreadsheetApp.newDataValidation()
+            .requireValueInList(fyNames, true)
+            .setAllowInvalid(false)
+            .build();
+        dashboard.getRange(`C${dropdownRow}`).setDataValidation(ruleYear);
+        dashboard.getRange(`C${dropdownRow}`).setValue(activeFYName)
+            .setFontWeight("bold").setFontSize(12).setFontColor("#1A73E8")
+            .setBackground("#E8F0FE").setHorizontalAlignment("center")
+            .setBorder(true, true, true, true, false, false, "#1A73E8", SpreadsheetApp.BorderStyle.SOLID);
+    }
+
+    applyModernTableHeader(dashboard.getRange(activeTableStart, 2, 1, 5));
+    dashboard.getRange(activeTableStart, 2, 1, 5).setValues([["Month/Year", "Total Salary", "Net Income", "Provident Fund", "Monthly Savings"]]);
+
+    const monthlyOverviewFormulas = [];
+    for (let k = 0; k < 12; k++) {
+        const srcRow = 4 + k;
+        monthlyOverviewFormulas.push([
+            `=IF(${dropdownCellRef}="", "-", IFERROR(INDIRECT("'" & ${dropdownCellRef} & "'!A${srcRow}"), "-"))`,
+            `=IF(${dropdownCellRef}="", 0, IFERROR(INDIRECT("'" & ${dropdownCellRef} & "'!F${srcRow}"), 0))`,
+            `=IF(${dropdownCellRef}="", 0, IFERROR(INDIRECT("'" & ${dropdownCellRef} & "'!H${srcRow}"), 0))`,
+            `=IF(${dropdownCellRef}="", 0, IFERROR(INDIRECT("'" & ${dropdownCellRef} & "'!J${srcRow}"), 0))`,
+            `=IF(${dropdownCellRef}="", 0, IFERROR(INDIRECT("'" & ${dropdownCellRef} & "'!K${srcRow}"), 0))`
+        ]);
+    }
+
+    dashboard.getRange(activeTableStart + 1, 2, 12, 5).setFormulas(monthlyOverviewFormulas);
+    applyModernTableBody(dashboard.getRange(activeTableStart + 1, 2, 12, 5));
+    dashboard.getRange(activeTableStart + 1, 3, 12, 4).setNumberFormat('#,##0"/="');
+
+    const rangeOverview = dashboard.getRange(activeTableStart, 2, 13, 5);
+
+    // 2. YEARLY SAVINGS TABLE
+    dashboard.getRange(`B${yearlyStartRow - 1}`).setValue("Yearly Savings Breakdown")
+        .setFontSize(13).setFontWeight("bold").setFontColor("#202124");
+
+    applyModernTableHeader(dashboard.getRange(yearlyStartRow, 2, 1, 2));
+    dashboard.getRange(yearlyStartRow, 2, 1, 2).setValues([["Financial Year", "Total Savings"]]);
+
+    const yearlyDataCount = fySheets.length;
+    const yearlyNames = [];
+    const yearlyFormulas = [];
+    for (let y = 0; y < fySheets.length; y++) {
+        const sName = fySheets[y].getName();
+        yearlyNames.push([sName]);
+        yearlyFormulas.push([`='${sName}'!K16`]);
+    }
+
+    if (yearlyDataCount > 0) {
+        dashboard.getRange(yearlyStartRow + 1, 2, yearlyDataCount, 1).setValues(yearlyNames);
+        dashboard.getRange(yearlyStartRow + 1, 3, yearlyDataCount, 1).setFormulas(yearlyFormulas);
+        dashboard.getRange(yearlyStartRow + 1, 3, yearlyDataCount, 1).setNumberFormat('#,##0"/="');
+        applyModernTableBody(dashboard.getRange(yearlyStartRow + 1, 2, yearlyDataCount, 2));
+    }
+
+    dashboard.getRange(`B${grandTotalRow}`).setValue("Grand Total").setFontWeight("bold");
+    if (yearlyDataCount > 0) {
+        dashboard.getRange(`C${grandTotalRow}`)
+            .setFormula(`=SUM(C${yearlyStartRow + 1}:C${grandTotalRow - 1})`)
+            .setFontWeight("bold").setNumberFormat('#,##0"/="');
+    } else {
+        dashboard.getRange(`C${grandTotalRow}`).setValue(0).setFontWeight("bold").setNumberFormat('#,##0"/="');
+    }
+
+    const rangeYearly = dashboard.getRange(yearlyStartRow, 2, (yearlyDataCount > 0 ? yearlyDataCount : 1) + 1, 2);
+
+    // 3. ACTIVE INVESTMENT ASSET ALLOCATION TABLE
+    dashboard.getRange(`B${invTableStart - 1}`).setValue("Active Investment Portfolio")
+        .setFontSize(13).setFontWeight("bold").setFontColor("#202124");
+
+    applyModernTableHeader(dashboard.getRange(invTableStart, 2, 1, 2));
+    dashboard.getRange(invTableStart, 2, 1, 2).setValues([["Asset Type", "Active Capital"]]);
+
+    const invAssetNames = [
+        ["Shonchoypotro"],
+        ["DPS"],
+        ["Business"],
+        ["In Savings Account"],
+        ["Cash (At Home)"],
+        ["Cash (With me)"],
+        ["Cash (Other)"]
+    ];
+    const invAssetFormulas = [
+        ['=SUMIFS(Investment!$C$3:$C$50, Investment!$B$3:$B$50, "*Shonchoy*", Investment!$G$3:$G$50, "<>Close")'],
+        ['=SUMIFS(\'DPS Tracker\'!$J$3:$J$5, \'DPS Tracker\'!$I$3:$I$5, "Active")'],
+        ['=SUMIFS(Investment!$C$3:$C$50, Investment!$B$3:$B$50, "*Business*", Investment!$G$3:$G$50, "<>Close")'],
+        ['=SUMIFS(Investment!$C$3:$C$50, Investment!$B$3:$B$50, "*Savings Account*", Investment!$G$3:$G$50, "<>Close")'],
+        ['=SUMIFS(\'Cash in Hand\'!$B$3:$B$5, \'Cash in Hand\'!$A$3:$A$5, "At Home")'],
+        ['=SUMIFS(\'Cash in Hand\'!$B$3:$B$5, \'Cash in Hand\'!$A$3:$A$5, "With me")'],
+        ['=SUMIFS(\'Cash in Hand\'!$B$3:$B$5, \'Cash in Hand\'!$A$3:$A$5, "Other")']
+    ];
+    dashboard.getRange(invTableStart + 1, 2, 7, 1).setValues(invAssetNames);
+    dashboard.getRange(invTableStart + 1, 3, 7, 1).setFormulas(invAssetFormulas);
+    applyModernTableBody(dashboard.getRange(invTableStart + 1, 2, 7, 2));
+    dashboard.getRange(invTableStart + 1, 3, 7, 1).setNumberFormat('#,##0"/="');
+
+    dashboard.getRange(`B${invTotalRow}`).setValue("Total Active").setFontWeight("bold");
+    dashboard.getRange(`C${invTotalRow}`)
+        .setFormula(`=SUM(C${invTableStart + 1}:C${invTotalRow - 1})`)
+        .setFontWeight("bold").setNumberFormat('#,##0"/="');
+
+    const rangeInvAsset = dashboard.getRange(invTableStart, 2, 8, 2);
+
+    // 4. PROVIDENT FUND SUMMARY TABLE (Dynamic live formulas)
+    dashboard.getRange(`B${pfStartRow - 1}`).setValue("Provident Fund Summary")
+        .setFontSize(13).setFontWeight("bold").setFontColor("#202124");
+
+    const pfColHeader = fySheets.length > 1 ? "Financial Year" : "Month / Year";
+    const pfHeaderRange = dashboard.getRange(`B${pfStartRow}:D${pfStartRow}`);
+    pfHeaderRange.setValues([[pfColHeader, "Employee PF", "Total PF (With Match)"]]);
+    applyModernTableHeader(pfHeaderRange);
+
+    let pfFormulas = [];
+    let pfDataCount = 0;
+
+    if (fySheets.length > 1) {
+        pfDataCount = fySheets.length;
+        const pfNames = [];
+        for (let i = 0; i < fySheets.length; i++) {
+            const sName = fySheets[i].getName();
+            const rowNum = pfStartRow + 1 + i;
+            pfNames.push([sName]);
+            pfFormulas.push([
+                `='${sName}'!J16`,
+                `=C${rowNum}*2`
+            ]);
+        }
+        dashboard.getRange(pfStartRow + 1, 2, pfDataCount, 1).setValues(pfNames);
+        dashboard.getRange(pfStartRow + 1, 3, pfDataCount, 2).setFormulas(pfFormulas);
+    } else {
+        pfDataCount = 12;
+        for (let m = 0; m < 12; m++) {
+            const srcRow = 4 + m;
+            const rowNum = pfStartRow + 1 + m;
+            if (activeFYName) {
+                pfFormulas.push([
+                    `='${activeFYName}'!A${srcRow}`,
+                    `='${activeFYName}'!J${srcRow}`,
+                    `=C${rowNum}*2`
+                ]);
+            } else {
+                pfFormulas.push(["-", 0, 0]);
+            }
+        }
+        dashboard.getRange(pfStartRow + 1, 2, pfDataCount, 3).setFormulas(pfFormulas);
+    }
+
+    dashboard.getRange(`B${pfTotalRow}`).setValue("Total").setFontWeight("bold");
+    if (fySheets.length > 1) {
+        dashboard.getRange(`C${pfTotalRow}`).setFormula(`=SUM(C${pfStartRow + 1}:C${pfTotalRow - 1})`).setFontWeight("bold");
+        dashboard.getRange(`D${pfTotalRow}`).setFormula(`=SUM(D${pfStartRow + 1}:D${pfTotalRow - 1})`).setFontWeight("bold");
+    } else if (activeFYName) {
+        dashboard.getRange(`C${pfTotalRow}`).setFormula(`='${activeFYName}'!J16`).setFontWeight("bold");
+        dashboard.getRange(`D${pfTotalRow}`).setFormula(`=C${pfTotalRow}*2`).setFontWeight("bold");
+    } else {
+        dashboard.getRange(`C${pfTotalRow}`).setValue(0).setFontWeight("bold");
+        dashboard.getRange(`D${pfTotalRow}`).setValue(0).setFontWeight("bold");
+    }
+
+    dashboard.getRange(`C${pfStartRow + 1}:D${pfTotalRow}`).setNumberFormat('#,##0"/="');
+    applyModernTableBody(dashboard.getRange(pfStartRow + 1, 2, pfDataCount + 1, 3));
+
+    // EXECUTIVE WEALTH SCORECARDS (Row 5 to 7: Net Worth, Savings, Investments, Earnings, Savings Rate)
+    let salaryFormula;
+    if (fySheets.length === 0) {
+        salaryFormula = 0;
+    } else if (fySheets.length === 1) {
+        salaryFormula = `='${fySheets[0].getName()}'!F16`;
+    } else {
+        salaryFormula = `=SUM(${fySheets.map(s => `'${s.getName()}'!F16`).join(",")})`;
+    }
+
+    // Card 1: Total Net Worth (Same as Master Year SUB TOTAL of Net Income)
+    const netWorthFormula = (fySheets.length > 0) ? `='Master Year'!H${masterSubTotalRow}` : 0;
+    createModernScorecard(dashboard, "B5:C7", "TOTAL NET WORTH", netWorthFormula, "#673AB7");
+    // Card 2: Total Savings
+    createModernScorecard(dashboard, "D5:E7", "TOTAL SAVINGS", `=C${grandTotalRow}`, "#34A853");
+    // Card 3: Active Investments
+    createModernScorecard(dashboard, "H5:I7", "ACTIVE INVESTMENTS", `=SUM(C${invTableStart + 1}:C${invTableStart + 4})`, "#FBBC04");
+    // Card 4: Total Earnings
+    createModernScorecard(dashboard, "J5:K7", "TOTAL EARNINGS", salaryFormula, "#1A73E8");
+    // Card 5: Overall Savings Rate (%) -> D7 / J7 (Total Savings / Total Earnings)
+    createModernScorecard(dashboard, "L5:M7", "SAVINGS RATE", "=IFERROR(D7/J7, 0)", "#00897B", "0.0%");
+
+    // LOCKED ASSETS & OVERALL WEALTH (Row 9 to 11)
+    dashboard.getRange("B9").setValue("Locked Assets & Overall Wealth").setFontSize(13).setFontWeight("bold").setFontColor("#202124");
+    // Card 6: Provident Fund
+    createModernScorecard(dashboard, "B10:C12", "PROVIDENT FUND (OFFICE)", `=D${pfTotalRow}`, "#E67C73");
+    // Card 7: Wealth With Me (Active Inv + PF)
+    createModernScorecard(dashboard, "D10:E12", "WEALTH WITH ME (INV + PF)", `=H7+B12`, "#FF7043");
+    // Card 8: Grand Total Wealth (Net Worth + PF)
+    createModernScorecard(dashboard, "H10:I12", "GRAND TOTAL WEALTH", `=B7+B12`, "#8E24AA");
+
+    // Grid spacing & column widths
+    dashboard.setColumnWidth(1, 30);  // Col A: Left padding
+    dashboard.setColumnWidth(2, 130); // Col B: Month/Year
+    dashboard.setColumnWidth(3, 120); // Col C: Total Salary / Employee PF / Total Savings
+    dashboard.setColumnWidth(4, 120); // Col D: Net Income / Total PF
+    dashboard.setColumnWidth(5, 120); // Col E: Provident Fund (Monthly)
+    dashboard.setColumnWidth(6, 120); // Col F: Monthly Savings
+    dashboard.setColumnWidth(7, 35);  // Col G: Clean spacer between tables and charts
+    dashboard.setColumnWidth(8, 120); // Col H: Chart start
+    dashboard.setColumnWidth(9, 120); // Col I
+    dashboard.setColumnWidth(10, 120); // Col J
+    dashboard.setColumnWidth(11, 120); // Col K
+    dashboard.setColumnWidth(12, 120); // Col L
+    dashboard.setColumnWidth(13, 120); // Col M
+
+    // CRITICAL: Flush all changes so Google Sheets calculates formulas before charts bind to them!
+    SpreadsheetApp.flush();
+
+    renderAllDashboardCharts(dashboard, rangeOverview, rangeYearly, rangeInvAsset, chart1Row, chart2Row, chart3Row, chart4Row);
+    trimSheet(dashboard, dashboardLastRow, 13);
+}
+
+function createModernScorecard(sheet, rangeStr, title, value, accentColor, customFormat) {
+    const range = sheet.getRange(rangeStr);
+    range.setBackground("#FFFFFF");
+    range.setBorder(true, true, true, true, false, false, "#DADCE0", SpreadsheetApp.BorderStyle.SOLID);
+
+    const startRow = range.getRow();
+    const startCol = range.getColumn();
+    const numCols = range.getNumColumns();
+
+    // Top accent bar
+    const topRow = sheet.getRange(startRow, startCol, 1, numCols);
+    topRow.setBorder(true, true, false, true, false, false, accentColor, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+
+    // Break apart to avoid overlapping merge exceptions from shifting layouts
+    sheet.getRange(startRow + 1, startCol, 2, numCols).breakApart();
+
+    // Title row (merged across card columns)
+    sheet.getRange(startRow + 1, startCol, 1, numCols).merge()
+        .setValue(title)
+        .setFontColor("#5F6368")
+        .setFontSize(9)
+        .setFontWeight("bold")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle");
+
+    // Value row (merged across card columns)
+    const valRange = sheet.getRange(startRow + 2, startCol, 1, numCols).merge();
+    if (typeof value === 'string' && value.startsWith('=')) {
+        valRange.setFormula(value);
+    } else {
+        valRange.setValue(value);
+    }
+    valRange.setFontColor("#202124")
+        .setFontSize(16)
+        .setFontWeight("bold")
+        .setNumberFormat(customFormat || '#,##0"/="')
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle");
+}
+
+function applyModernTableHeader(range) {
+    range.setBackground("#FFFFFF")
+        .setFontColor("#5F6368")
+        .setFontSize(10)
+        .setFontWeight("bold")
+        .setBorder(false, false, true, false, false, false, "#DADCE0", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+}
+
+function applyModernTableBody(range) {
+    range.setBackground("#FFFFFF")
+        .setFontColor("#3C4043")
+        .setFontSize(10)
+        .setBorder(false, false, true, false, false, true, "#E8EAED", SpreadsheetApp.BorderStyle.SOLID);
+}
+
+function applyProfessionalBorders(range) {
+    range.setBorder(
+        true, true, true, true, true, true,
+        "#5D6D7E",
+        SpreadsheetApp.BorderStyle.SOLID
+    );
+}
+
+function renderAllDashboardCharts(dashboard, overviewRange, yearlySavingsRange, invAssetRange, chartRow1, chartRow2, chartRow3, chartRow4) {
+    const charts = dashboard.getCharts();
+    charts.forEach(c => dashboard.removeChart(c));
+
+    const chartWidth = 630;
+    const chartHeight = 270;
+
+    // 1. Monthly Financial Trends Line Chart
+    const chart1 = dashboard.newChart()
+        .asLineChart()
+        .addRange(overviewRange)
+        .setPosition(chartRow1, 8, 0, 0)
+        .setNumHeaders(1)
+        .setOption('title', 'Monthly Trends  [ 🔵 Total Salary  |  🔴 Net Income  |  🟣 Provident Fund  |  🟡 Monthly Savings ]')
+        .setOption('titleTextStyle', { fontSize: 12, bold: true, color: '#202124' })
+        .setOption('hAxis', {
+            title: 'Month',
+            titleTextStyle: { fontSize: 10, italic: false, color: '#5F6368' },
+            textStyle: { fontSize: 9, color: '#5F6368' }
+        })
+        .setOption('vAxes', {
+            0: {
+                title: 'Amount (BDT)',
+                titleTextStyle: { fontSize: 10, italic: false, color: '#5F6368' },
+                textStyle: { fontSize: 9, color: '#5F6368' }
+            }
+        })
+        .setOption('width', chartWidth)
+        .setOption('height', chartHeight)
+        .setOption('curveType', 'function')
+        .setOption('pointSize', 5)
+        .setOption('legend', { position: 'bottom', textStyle: { color: '#5F6368', fontSize: 10 } })
+        .setOption('colors', ['#1A73E8', '#EA4335', '#9C27B0', '#FBBC04']) // Blue, Red, Purple, Yellow
+        .setOption('series', {
+            0: { labelInLegend: 'Total Salary (Blue)' },
+            1: { labelInLegend: 'Net Income (Red)' },
+            2: { labelInLegend: 'Provident Fund (Purple)' },
+            3: { labelInLegend: 'Monthly Savings (Yellow)' }
+        })
+        .build();
+
+    // 2. Monthly Earnings Comparison Column Chart
+    const chart2 = dashboard.newChart()
+        .asColumnChart()
+        .addRange(overviewRange)
+        .setPosition(chartRow2, 8, 0, 0)
+        .setNumHeaders(1)
+        .setOption('title', 'Monthly Comparison  [ 🔵 Total Salary  |  🔴 Net Income  |  🟣 Provident Fund  |  🟡 Monthly Savings ]')
+        .setOption('titleTextStyle', { fontSize: 12, bold: true, color: '#202124' })
+        .setOption('hAxis', {
+            title: 'Month',
+            titleTextStyle: { fontSize: 10, italic: false, color: '#5F6368' },
+            textStyle: { fontSize: 9, color: '#5F6368' }
+        })
+        .setOption('vAxes', {
+            0: {
+                title: 'Amount (BDT)',
+                titleTextStyle: { fontSize: 10, italic: false, color: '#5F6368' },
+                textStyle: { fontSize: 9, color: '#5F6368' }
+            }
+        })
+        .setOption('width', chartWidth)
+        .setOption('height', chartHeight)
+        .setOption('legend', { position: 'bottom', textStyle: { color: '#5F6368', fontSize: 10 } })
+        .setOption('colors', ['#1A73E8', '#EA4335', '#9C27B0', '#FBBC04'])
+        .setOption('series', {
+            0: { labelInLegend: 'Total Salary (Blue)' },
+            1: { labelInLegend: 'Net Income (Red)' },
+            2: { labelInLegend: 'Provident Fund (Purple)' },
+            3: { labelInLegend: 'Monthly Savings (Yellow)' }
+        })
+        .build();
+
+    // 3. Yearly Savings Progress Column Chart
+    const chart3 = dashboard.newChart()
+        .asColumnChart()
+        .addRange(yearlySavingsRange)
+        .setPosition(chartRow3, 8, 0, 0)
+        .setNumHeaders(1)
+        .setOption('title', 'Yearly Total Savings Across Financial Years  [ 🟢 Total Savings ]')
+        .setOption('titleTextStyle', { fontSize: 12, bold: true, color: '#202124' })
+        .setOption('hAxis', {
+            title: 'Financial Year',
+            titleTextStyle: { fontSize: 10, italic: false, color: '#5F6368' },
+            textStyle: { fontSize: 9, color: '#5F6368' }
+        })
+        .setOption('vAxes', {
+            0: {
+                title: 'Savings (BDT)',
+                titleTextStyle: { fontSize: 10, italic: false, color: '#5F6368' },
+                textStyle: { fontSize: 9, color: '#5F6368' }
+            }
+        })
+        .setOption('width', chartWidth)
+        .setOption('height', chartHeight)
+        .setOption('legend', { position: 'bottom', textStyle: { color: '#5F6368', fontSize: 10 } })
+        .setOption('colors', ['#34A853'])
+        .setOption('series', {
+            0: { labelInLegend: 'Total Savings (Green)' }
+        })
+        .build();
+
+    // 4. Active Investment Asset Allocation Donut Chart
+    const chart4 = dashboard.newChart()
+        .setChartType(Charts.ChartType.PIE)
+        .addRange(invAssetRange)
+        .setPosition(chartRow4, 8, 0, 0)
+        .setNumHeaders(1)
+        .setOption('title', 'Active Investment Portfolio  [ 🟢 Shonchoypotro | 🔵 DPS | 🟡 Business | 🟣 Savings Account | 🟠 Cash in Hand ]')
+        .setOption('titleTextStyle', { fontSize: 12, bold: true, color: '#202124' })
+        .setOption('width', chartWidth)
+        .setOption('height', chartHeight)
+        .setOption('pieHole', 0.4) // Donut Chart format
+        .setOption('pieSliceText', 'value') // Shows the actual amounts on each slice!
+        .setOption('pieSliceTextStyle', { fontSize: 10 })
+        .setOption('legend', { position: 'right', textStyle: { color: '#5F6368', fontSize: 10 } })
+        .setOption('colors', ['#34A853', '#1A73E8', '#FBBC04', '#9C27B0', '#FF9800']) // Shonchoypotro (Green), DPS (Blue), Business (Yellow), Savings Account (Purple), Cash in Hand (Orange)
+        .build();
+
+    dashboard.insertChart(chart1);
+    dashboard.insertChart(chart2);
+    dashboard.insertChart(chart3);
+    dashboard.insertChart(chart4);
+}
+
+function trimAllSheets(ss) {
+    if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheets = ss.getSheets();
+
+    sheets.forEach(sheet => {
+        const sName = sheet.getName();
+
+        if (FY_REGEX.test(sName)) {
+            trimSheet(sheet, 16, 11);
+        } else if (sName === "Investment") {
+            // FIX: Trimming to 8 columns instead of 7 to preserve the Remarks column
+            trimSheet(sheet, 50, 8);
+        } else if (sName === "Expenses") {
+            trimSheet(sheet, Math.max(sheet.getLastRow(), 50), 5);
+        } else if (sName === "DPS Tracker") {
+            trimSheet(sheet, Math.max(sheet.getLastRow(), 50), 10);
+        } else if (sName === "Cash in Hand") {
+            trimSheet(sheet, 6, 3);
+        } else if (sName === "Master Year") {
+            const lastRow = sheet.getLastRow();
+            if (lastRow > 0) {
+                trimSheet(sheet, Math.max(lastRow, 16), 11);
+            }
+        } else if (sName === "Dashboard") {
+            trimSheet(sheet, getDashboardTargetRows(ss), 13);
+        }
+    });
+}
+
+function getDashboardTargetRows(ss) {
+    if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+    const dashboard = ss.getSheetByName("Dashboard");
+    const sheets = ss.getSheets();
+
+    let fySheetsCount = 0;
+    sheets.forEach(s => {
+        if (FY_REGEX.test(s.getName())) fySheetsCount++;
+    });
+
+    const pfDataCount = fySheetsCount > 1 ? fySheetsCount : 12;
+    const dropdownRow = 15;
+    const activeTableStart = dropdownRow + 2;
+    const yearlyStartRow = Math.max(activeTableStart + 12 + 3, 32);
+    const grandTotalRow = yearlyStartRow + (fySheetsCount > 0 ? fySheetsCount : 1) + 1;
+    const invTableStart = Math.max(grandTotalRow + 3, 42);
+    const invTotalRow = invTableStart + 8;
+    const pfStartRow = Math.max(invTotalRow + 3, 52);
+    const pfTotalRow = pfStartRow + 1 + pfDataCount;
+
+    const chart1Row = 15;
+    const chart2Row = Math.max(chart1Row + 16, activeTableStart);
+    const chart3Row = Math.max(chart2Row + 16, yearlyStartRow);
+    const chart4Row = Math.max(chart3Row + 16, invTableStart);
+
+    // Keep 3 blank rows below the last graph so it is never cut off
+    let calculatedLastRow = Math.max(chart4Row + 16, pfTotalRow + 2) + 3;
+
+    if (dashboard) {
+        const charts = dashboard.getCharts();
+        charts.forEach(chart => {
+            try {
+                const container = chart.getContainerInfo();
+                if (container) {
+                    const anchorRow = container.getAnchorRow();
+                    const chartBottomWithBuffer = anchorRow + 16 + 3;
+                    if (chartBottomWithBuffer > calculatedLastRow) {
+                        calculatedLastRow = chartBottomWithBuffer;
+                    }
+                }
+            } catch (e) { }
+        });
+    }
+
+    return calculatedLastRow;
+}
+
+function ensureSheetDimensions(sheet, minRows, minCols) {
+    if (!sheet) return;
+    const currentRows = sheet.getMaxRows();
+    if (currentRows < minRows) {
+        sheet.insertRowsAfter(currentRows, minRows - currentRows);
+    }
+    const currentCols = sheet.getMaxColumns();
+    if (currentCols < minCols) {
+        sheet.insertColumnsAfter(currentCols, minCols - currentCols);
+    }
+}
+
+function trimSheet(sheet, targetRows, targetCols) {
+    if (!sheet) return;
+    const currentRows = sheet.getMaxRows();
+    if (currentRows > targetRows) {
+        sheet.deleteRows(targetRows + 1, currentRows - targetRows);
+    }
+    const currentCols = sheet.getMaxColumns();
+    if (currentCols > targetCols) {
+        sheet.deleteColumns(targetCols + 1, currentCols - targetCols);
+    }
+}
+
+function exportPdfPrompt() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    trimAllSheets(ss);
+    SpreadsheetApp.flush();
+
+    const sheets = ss.getSheets();
+
+    // Build sheet selector options dynamically
+    let optionsHtml = '<option value="ALL">📄 Complete Workbook (All Sheets)</option>';
+    sheets.forEach(sheet => {
+        const sName = sheet.getName();
+        const sId = sheet.getSheetId();
+        let icon = "📄";
+        if (sName === "Dashboard") icon = "📊";
+        else if (sName === "Master Year") icon = "📑";
+        else if (sName === "Investment") icon = "💼";
+        else if (sName === "Expenses") icon = "💸";
+        else if (sName === "DPS Tracker") icon = "🏦";
+        else if (sName === "Cash in Hand") icon = "💵";
+        else if (FY_REGEX.test(sName)) icon = "📅";
+
+        optionsHtml += `<option value="${sId}">${icon} ${sName}</option>`;
+    });
+
+    const htmlContent = `
+        <div style="font-family: Google Sans, Roboto, Arial, sans-serif; padding: 18px; color: #202124;">
+            <h3 style="color: #1A73E8; margin: 0 0 6px 0; text-align: center; font-size: 18px;">Export Clean PDF</h3>
+            <p style="color: #5F6368; font-size: 12px; margin: 0 0 16px 0; text-align: center;">Direct download to avoid multi-account access errors.</p>
+
+            <div style="margin-bottom: 14px;">
+                <label style="display: block; font-size: 12px; font-weight: bold; color: #3C4043; margin-bottom: 5px;">Select Sheet to Export:</label>
+                <select id="sheetSelect" onchange="onSheetChange()" style="width: 100%; padding: 8px 10px; font-size: 13px; font-family: inherit; border: 1px solid #DADCE0; border-radius: 6px; background: #FFFFFF; color: #202124; outline: none; cursor: pointer;">
+                    ${optionsHtml}
+                </select>
+            </div>
+
+            <div style="margin-bottom: 18px;">
+                <label style="display: block; font-size: 12px; font-weight: bold; color: #3C4043; margin-bottom: 5px;">Page Fit Mode:</label>
+                <select id="fitSelect" style="width: 100%; padding: 8px 10px; font-size: 13px; font-family: inherit; border: 1px solid #DADCE0; border-radius: 6px; background: #FFFFFF; color: #202124; outline: none; cursor: pointer;">
+                    <option value="2">📏 Fit to Page Width (Standard / Multi-Page)</option>
+                    <option value="4">📄 Fit Entire Sheet to 1 Page (No Blank Pages)</option>
+                </select>
+            </div>
+
+            <div style="text-align: center;">
+                <button id="downloadBtn" onclick="triggerDownload()" style="width: 100%; border: none; cursor: pointer; padding: 12px 20px; background: #1A73E8; color: #FFFFFF; border-radius: 6px; font-weight: bold; font-size: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.2);">
+                    📥 Download Selected PDF
+                </button>
+                <div id="statusMsg" style="margin-top: 10px; font-size: 12px; color: #EA4335; font-weight: bold; display: none;"></div>
+            </div>
+
+            <script>
+                function onSheetChange() {
+                    var sheetVal = document.getElementById("sheetSelect").value;
+                    var fitSelect = document.getElementById("fitSelect");
+                    if (sheetVal !== "ALL") {
+                        fitSelect.value = "4";
+                    } else {
+                        fitSelect.value = "2";
+                    }
+                }
+
+                function triggerDownload() {
+                    var sheetVal = document.getElementById("sheetSelect").value;
+                    var fitVal = document.getElementById("fitSelect").value;
+                    var btn = document.getElementById("downloadBtn");
+                    var statusMsg = document.getElementById("statusMsg");
+                    
+                    btn.disabled = true;
+                    btn.style.background = "#A0C3FF";
+                    btn.innerText = "⏳ Generating PDF... Please wait";
+                    statusMsg.style.display = "none";
+
+                    google.script.run
+                        .withSuccessHandler(function(pdfData) {
+                            var a = document.createElement('a');
+                            a.href = 'data:application/pdf;base64,' + pdfData.data;
+                            a.download = pdfData.filename;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            
+                            btn.disabled = false;
+                            btn.style.background = "#1A73E8";
+                            btn.innerText = "📥 Download Selected PDF";
+                            setTimeout(function(){ google.script.host.close(); }, 1000);
+                        })
+                        .withFailureHandler(function(error) {
+                            btn.disabled = false;
+                            btn.style.background = "#1A73E8";
+                            btn.innerText = "📥 Download Selected PDF";
+                            statusMsg.innerText = "Error: " + error.message;
+                            statusMsg.style.display = "block";
+                        })
+                        .generatePdfServer(sheetVal, fitVal);
+                }
+            </script>
+        </div>
+    `;
+
+    const html = HtmlService.createHtmlOutput(htmlContent).setWidth(440).setHeight(300);
+    SpreadsheetApp.getUi().showModalDialog(html, "Export PDF Report");
+}
+
+function generatePdfServer(sheetId, fitVal) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ssId = ss.getId();
+    
+    // FORCE DRIVE SCOPE: This dummy call ensures Google Apps Script requests 
+    // the correct Google Drive permissions for ScriptApp.getOAuthToken().
+    DriveApp.getFileById(ssId);
+    
+    let url = 'https://docs.google.com/spreadsheets/d/' + ssId + '/export?format=pdf&size=7&portrait=false&gridlines=false&printtitle=false&fzr=false&top_margin=0.25&bottom_margin=0.25&left_margin=0.25&right_margin=0.25&scale=' + fitVal;
+
+    let filename = ss.getName();
+    if (sheetId === 'ALL') {
+        url += '&sheetnames=true&pagenumbers=true';
+        filename += ' - Full Report.pdf';
+    } else {
+        url += '&sheetnames=false&pagenumbers=false&gid=' + sheetId;
+        const sheet = getSheetById(ss, sheetId);
+        if (sheet) {
+            filename += ' - ' + sheet.getName() + '.pdf';
+        } else {
+            filename += ' - Export.pdf';
+        }
+    }
+
+    const token = ScriptApp.getOAuthToken();
+    const response = UrlFetchApp.fetch(url, {
+        headers: { 'Authorization': 'Bearer ' + token },
+        muteHttpExceptions: true
+    });
+
+    if (response.getResponseCode() !== 200) {
+        throw new Error("Unable to export PDF. Code: " + response.getResponseCode());
+    }
+
+    const blob = response.getBlob();
+    return {
+        data: Utilities.base64Encode(blob.getBytes()),
+        filename: filename
+    };
+}
+
+function getSheetById(ss, id) {
+    const sheets = ss.getSheets();
+    for (let i = 0; i < sheets.length; i++) {
+        if (sheets[i].getSheetId().toString() === id.toString()) {
+            return sheets[i];
+        }
+    }
+    return null;
+}
+
+function exportFullWorkbookToPdf() {
+    exportPdfPrompt();
+}
+
+function exportDashboardOnlyToPdf() {
+    exportPdfPrompt();
+}
+
+function exportDashboardToPdf() {
+    exportPdfPrompt();
+}
